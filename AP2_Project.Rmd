@@ -1,0 +1,472 @@
+---
+title: "Asset Pricing 2 Project"
+author: "Jia Ru"
+date: "2016-4-5"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE,
+                      message = FALSE,
+                      warning = FALSE,
+                      error = FALSE,
+                      results='hold',
+                      cache = TRUE
+                      )
+```
+
+##  1. Replicate exactly the same results as the examples for pricing barrier option in the PPTs.
+
+We assume FX rate follows a geometric Brownian motion
+$$ dS_t = \mu S_t dt + \sigma S_t dW_t $$
+To simulate this path, we divide the time period to $N$ small intervals of length $\Delta t = T/N$, and discretize the SDE by
+$$ S_{t+\Delta t} - S_t = S_t(\mu \Delta t + \sigma \sqrt{\Delta t}Z_t) $$
+where $Z$ is standard normal variable.    
+Follow the algorithm on Slides, I write the code:
+
+```{r 1., eval=F}
+
+rm(list = ls())
+
+M <- 10000
+N <- 1000
+TT <- 1
+delta_t <- TT/N
+mu <- 0.03
+sigma <- 0.12
+U <- 1.71
+L <- 1.29
+X <- 1.4
+S0 <- 1.5
+
+f <- function(foo){
+  S <- rep(NA,N)
+  S[1] <- S0
+  Z <- rnorm(N)
+  for (t in 2:N){
+    S[t] <- S[t-1] * (1 + mu*delta_t + sigma*sqrt(delta_t)*Z[t])
+    if (N*1/12<t & t<N*6/12 & S[t]>U) return(0)
+    if (N*8/12<t & t<N*11/12 & S[t]<L) return(0)
+    if (t>N*11/12 & (S[t]>1.8|S[t]<1.3)) return(0)
+  }
+  #plot(x=1:N, y=S, type =  "l")
+  payoff <- max(0,S[N]-X)
+  return(payoff)
+}
+
+library(plyr)
+library(doMC)
+registerDoMC(8)
+
+payoff_set <- 
+  laply(.data = as.list(1:M), 
+        .fun = f, 
+        .parallel = TRUE,
+        .progress = "text"
+        )
+
+p_mean <- mean(payoff_set)/(1+mu)
+p_se <- sd(payoff_set)/sqrt(M)
+
+p_mean
+p_se
+
+```
+
+run the code I got the results: mean of option price is 0.08721852, Standard Error is 1.053E-3.
+
+run the code 5 times, I got almost same results:
+\begin{tabular}{|c|c|c|c|c|c|}
+	\hline  & 1 & 2 & 3 & 4 & 5 \\ 
+	\hline mean & 0.08809493 & 0.08584553 & 0.09035277 & 0.08712246 & 0.08908662 \\ 
+	\hline SE & 0.001068521 & 0.001064478 & 0.001094953 & 0.001069485 & 0.001080291 \\ 
+	\hline 
+\end{tabular} 
+
+## 2. Price European call option using Monte Carlo simulation, compare with result from analytic B-S formula. This procedure is called "benchmarking".
+
+First, use Monte Carlo simulation.
+
+```{r 2.MC}
+
+rm(list = ls())
+
+set.seed(12345)
+S <- 1.5
+K <- 1.4
+sigma <- 0.12
+r <- 0.03
+ttm <- 1  # time to maturity
+
+num.sim <- 10000
+
+R <- (r-0.5*sigma^2)*ttm 
+SD <- sigma*sqrt(ttm)
+TTM.price<-S*exp(R+SD*rnorm(num.sim))
+TTM.call<-pmax(0,TTM.price-K)
+PV.call<-TTM.call*(exp(-r*ttm))
+
+MC.call <- mean(PV.call)
+MC.call
+
+```
+The Monte Carlo simualtion result of call opiton price is 0.1609742
+
+Next, use B-S formula to calculate the European call option price
+$$ C_{B-S} = S\Phi(d_{+})-Ke^{-r(T-t)}\Phi(d_{-}) $$
+
+```{r 2.BS}
+
+d1 <- (log(S/K)+(r+0.5*sigma^2)*ttm)/(sigma*sqrt(ttm)) # d+
+d2 <- d1-sigma*sqrt(ttm) # d-
+
+BS.call <- S*pnorm(d1)-K*exp(-r*ttm)*pnorm(d2)
+BS.call
+
+```
+
+As the above output shows, the Black-Scholes call option value is 0.1610577. which is pretty close to the MC call option value of 0.1609742
+
+
+## 3. Price this barrier option by Heston stochastic volatility using Monte Carlo simulation, also plot one sample path which hits the barrier and one path that never hits the barrier.
+
+Heston's SV model is an extension of B-S model where the instantaneous volatility is itself a stochaastic process:
+$$ \frac{dS_t}{S_t}=\mu dt +\sqrt{v_t}dW_t^1 $$
+$$ dv_t = \kappa(\theta-v_t)dt + \sigma\sqrt{v_t}dW_t^2 $$
+$$ dW_t^1 dW_t^2 = \rho dt $$
+Discretize:
+$$ \log S_{t+\Delta t} - \log S_t = (r-0.5v_t)\Delta t +\sqrt{v_t}\sqrt{\Delta t} Z_{t+1}^S $$
+$$	\log v_{t+\Delta t} - \log v_t = \frac{1}{v_t}(\kappa(\theta-v_t)-\lambda v_t -0.5\sigma^2)\Delta t + \sigma \frac{1}{v_t}\sqrt{\Delta t} Z_{t+1}^v $$
+$$  Z^v_t = \rho Z^s_t +\sqrt{1-\rho^2}Z_t 	$$
+
+I write the following code to simulate the path on stock price and price the barriar call option.
+
+```{r 3.HestonSV_f, eval=T}
+
+rm(list = ls())
+
+############  function that simulate ONE path  ################
+
+f <- function(S0=100, K=90, r=0.025, ttm=1, v0=0.01, N=1000,
+              rho=0.1, kap=2, theta=0.01, lambda=0.05, sigma=0.1,
+              U=118, L=81, a=90, b=120)
+{
+  delta_t <- ttm/N
+  
+  Zs <- rnorm(N)  
+  Zv <- rho*Zs + sqrt(1-rho^2)*rnorm(N)
+  
+  S <- c(S0,rep(NA,N-1)) # initalization of St
+  lnS <- log(S)
+  v <- c(v0,rep(NA,N-1)) # initalization of vt
+  lnv <- log(v)
+  for (t in 2:N) {
+    # generate St one by one
+    lnv[t] <- lnv[t-1] 
+    + 1/v[t-1]*(kap*(theta-v[t-1])-lambda*v[t-1]-0.5*sigma^2)*delta_t 
+    + sigma*1/sqrt(v[t-1])*sqrt(delta_t)*Zv[t]
+    v[t] <- exp(lnv[t])
+    lnS[t] <- lnS[t-1] + (r-0.5*v[t-1])*delta_t + sqrt(v[t-1])*sqrt(delta_t)*Zs[t]
+    S[t] <- exp(lnS[t])
+    
+    # hit barriar ?
+    if (
+      (N*1/12<t && t<N*6/12 && S[t]>U) 
+      || (N*8/12<t && t<N*11/12 && S[t]<L) 
+      || (t>N*11/12 && (S[t]>b|S[t]<a)) 
+    ){
+      payoff <- 0
+      dietime <- t
+      break
+      }
+  }
+    if (is.na(S[N])==FALSE) {
+      payoff <- max(0,S[N]-K)
+      dietime <- "didn't hit barriar"
+      }
+  
+  return(list(St=S,dietime=dietime,payoff=payoff))
+}
+```
+
+```{r 3.HestonSV_MC, eval=F}
+
+############  Monte Carlo simulation  ################
+
+set.seed(123456)
+M <- 5000   # number of simulations
+
+library(plyr)
+library(doMC)
+registerDoMC(8)  
+
+payoff_set <- laply(
+  .data = 1:M,
+  .fun = function(foo) return(f()$payoff),
+  .parallel = TRUE,
+  .progress = "text"
+)
+
+rf <- 0.025  # f() function default risk free intrest rate is also 0.025
+p_mean <- mean(payoff_set)/(1+rf) 
+p_se <- sd(payoff_set/(1+rf))/sqrt(M)
+
+p_mean
+p_se
+
+```
+
+run the code above I got the simulated barriar call option price as 9.948896
+
+plot some representable sample paths:
+
+```{r 3.plot, eval=T}
+
+############  plot  ################
+
+library(ggplot2)
+U=118
+L=81
+a=90
+b=120
+N=1000
+# month : 1,6,8,11
+
+p <- ggplot() + 
+  geom_blank(aes(x=1:N,y=seq(from = 75, to = 125, length.out = N))) +
+  xlab("time line : one year, 1000 steps") + 
+  ylab("stock price") +
+  ggtitle("3. Heston stochastic volatility") +
+  geom_segment(aes(x=1/12*N,xend=6/12*N,y=U,yend=U)) +
+  geom_segment(aes(x=8/12*N,xend=11/12*N,y=L,yend=L)) +
+  geom_segment(aes(x=11/12*N,xend=N,y=a,yend=a)) +
+  geom_segment(aes(x=11/12*N,xend=N,y=b,yend=b))
+
+
+for (i in 1:5) {
+  if (i==1) set.seed(123)
+  if (i==2) set.seed(777)
+  if (i==3) set.seed(666)
+  if (i==4) set.seed(112) # hit barriar
+  if (i==5) set.seed(779) # hit barriar
+  ff <- f()
+  assign(paste0("S",i),ff$St)
+  assign(paste0("v",i),ff$dietime)
+}
+
+p + 
+  geom_line(aes(x=1:N, y=S1),col="blue") +
+  geom_line(aes(x=1:N, y=S2),col="blue") +
+  geom_line(aes(x=1:N, y=S3),col="blue") +
+  geom_line(aes(x=1:N, y=S4),col="red") +
+  geom_segment(aes(x=v4,xend=v4,y=S4[v4],yend=75),col="red") +
+  geom_line(aes(x=1:N, y=S5),col="red") +
+  geom_segment(aes(x=v5,xend=v5,y=S5[v5],yend=75),col="red")
+  
+```
+  
+
+## 4. Price barrier option by Merton's Poisson jump model using Monte Carlo simulation, also plot one sample path which hits the barrier and one path that never hits the barrier.
+
+Merton's Poisson jump model is just standard Geometric Brownian Motion plus Poisson jumps:
+$$ \frac{dS_t}{S_t} = (r-\lambda\bar{k}) dt + \sigma dW_t + kdq_t $$
+where $q_t$ is compound Poisson process with intensity $\lambda$,and
+$$ \ln(1+k) \sim N(\gamma, \delta^2), \quad \bar{k} = e^{\gamma+\delta^2}-1 $$
+The solution is
+$$ S_t = S_0 e^{(r-\lambda\bar{k}-0.5\sigma^2)t + \sigma W_t} \prod_{i=0}^{n(t)}(1+k_i) $$
+where $n(t)$ is Poisson process with rate $\lambda$
+Take log we have
+$$ \ln S_t - \ln S_0 = (r-\lambda\bar{k}-0.5\sigma^2)t + \sigma W_t + \sum_{i=1}^{n(t)}\ln(1+k_i) $$
+discretize:
+$$ \ln S_{t+\Delta t} - \ln S_t = 
+(r-\lambda\bar{k}-0.5\sigma^2)\Delta t 
++ \sigma \sqrt{\Delta t} Z_t 
++ \Bigg[ \sum_{i=1}^{n(t+\Delta t)}\ln(1+k_i) - \sum_{i=1}^{n(t)}\ln(1+k_i) \Bigg]$$
+Other terms are easy to calculate except the term in bracket. We can use a property of Poisson process: for any $s$, the increment $n(t+s)-n(t)$ follows poisson distribution with parameter $s \lambda$. So the term in bracket can be calculated with command  `sum(rnorm(n=rpois(lambda*delta_t), mean=gamma, sd=delta))`. Note that $\ln(1+k_i)$ is i.i.n.
+
+```{r 4.jump_f, eval=T}
+
+rm(list=ls())
+
+# ####################################################### #  
+#     function that simulate ONE path of Stock price      #
+# ####################################################### #  
+
+f <- function(
+  S0 = 100, K = 90, r = 0.025, sigma = 0.15, TT = 1, N = 1000, 
+  lambda = 5, gamma = 0, delta = 0.08,    # parameters of jump
+  U = 130, L = 70, m1 = 1, m2 = 6, m3 = 8, m4 = 11 
+){
+  delta_t <- TT/N 
+  k_bar <- exp(gamma + delta^2)-1
+
+  lnS <- c(log(S0),rep(NA,N-1))   # initalization of ln(S_t)
+  for (t in 2:N){
+  lnS[t] <- lnS[t-1] + 
+    (r  - lambda*k_bar - 0.5*sigma^2)*delta_t +
+    sigma*sqrt(delta_t)*rnorm(1) + 
+    sum(rnorm(rpois(n=1, lambda=lambda*delta_t), mean = gamma, sd = delta))  
+  # hit barriar ?
+  S <- exp(lnS)
+  if (
+    (S[t]>U && t/N>m1/12 && t/N<m2/12) 
+    || (S[t]<L && t/N>m3/12 && t/N<m4/12) 
+  ) {
+    payoff <- 0; dietime <- t; break
+  } else {
+      payoff <- max(0,S[N]-K)
+      dietime <- N
+    } # end if
+  } # end for
+  
+  return(list(S=S,dietime=dietime,payoff=payoff))
+} 
+```
+
+```{r 4.jump_MC, eval=F}
+
+# ####################################################### #  
+#          Monte Carlo simulation
+# ####################################################### #  
+library(plyr)
+library(doMC)
+registerDoMC(8)
+
+M <- 5000
+N <- 1000
+r <- 0.025
+
+payoff_set <- laply(
+  .data = 1:M,
+  .fun = function(foo) return(f(r=r, N=N)$payoff),
+  .parallel = T,
+  .progress = "text"
+)
+
+p_mean <- mean(payoff_set)/(1+r) 
+p_se <- sd(payoff_set/(1+r))/sqrt(M)
+
+p_mean
+p_se
+
+```
+
+run the code 5 times, I got almost same results:
+
+\begin{tabular}{|c|c|c|c|c|c|}
+	\hline  & 1 & 2 & 3 & 4 & 5 \\ 
+	\hline mean & 11.6571 & 11.23386 & 11.85368 & 11.8501 & 11.7291 \\ 
+	\hline SE & 0.2205481 & 0.2232357 & 0.2352804 & 0.2127964 & 0.2227964 \\ 
+	\hline 
+\end{tabular} 
+
+Five plots of simulated path :
+```{r 4.jump_plot, eval=T}
+# ####################################################### #  
+#          Visualization
+# ####################################################### #  
+
+library(ggplot2)
+
+N=1000
+m1=1; m2=6; m3=8; m4=11
+U=130; L=70
+
+p <- ggplot() + 
+  geom_blank(aes(x=1:N,y=seq(from = 60, to = 135, length.out = N))) +
+  xlab("time line : one year, 1000 steps") + 
+  ylab("stock price") +
+  ggtitle("4. Merton's Poisson jump") +
+  geom_segment(aes(x=m1/12*N,xend=m2/12*N,y=U,yend=U)) +
+  geom_segment(aes(x=m3/12*N,xend=m4/12*N,y=L,yend=L)) 
+
+
+for (i in 1:5) {
+  if (i==1) set.seed(1)
+  if (i==2) set.seed(2)
+  if (i==3) set.seed(777)
+  if (i==4) set.seed(4) # hit barriar
+  if (i==5) set.seed(5) # hit barriar
+  ff <- f()
+  assign(paste0("S",i),ff$S)
+  assign(paste0("d",i),ff$dietime)
+}
+
+p + 
+  geom_line(aes(x=1:N, y=S1),col="darkolivegreen3") +
+  geom_line(aes(x=1:N, y=S2),col="darkolivegreen") +
+  geom_line(aes(x=1:N, y=S3),col="darkolivegreen4") +
+  geom_line(aes(x=1:N, y=S4),col="red") +
+  geom_segment(aes(x=d4,xend=d4,y=S4[d4],yend=60),col="red") +
+  geom_line(aes(x=1:N, y=S5),col="red") +
+  geom_segment(aes(x=d5,xend=d5,y=S5[d5],yend=60),col="red2")
+
+```
+
+
+
+
+
+
+
+
+
+
+
+
+## 5. Price discrete-monitored barrier options (e.g. at the closing of the last day of each month or each day), and compare with the price under the continuous-time version.
+Here I examine 5 cases: Benchmark (no barriar), monitored monthly, weekly, daily and continuously. By intuition, the (barriar) European call option price will decrease along these 5 cases. I will simulate the underlying stock price path and replicate it M=5000 times, draw the boxplot of simulated option price for each case.
+
+
+```{r}
+
+rm(list = ls())
+
+# ####################################################### #  
+#         f():  simulate ONE path of Stock price          #
+# ####################################################### #  
+
+f <- function(
+  S0 = 100, K = 90, r = 0.025, sigma = 0.15, TT = 1, N = 12*30*24, 
+  U = 120, L = 85, m1 = 1, m2 = 6, m3 = 8, m4 = 11,
+  monitor = "benchmark"  # or monthly, weekly, daily)
+){
+  delta_t <- TT/N
+  S <- c(S0,rep(NA,N-1))
+  lnS <- log(S)
+  Z <- rnorm(N)
+  for (t in 2:N) {
+    # 1. generate next S[t]
+      lnS[t] <- lnS[t-1] + (r-0.5*sigma^2)*delta_t + sigma*sqrt(delta_t)*rnorm(1)
+      S[t] <- exp(lnS[t])
+    
+    # 2. CHECK whether it's time to monitor, if not, `next`
+    if (monitor=="benchmark") next
+    Dcheck <- (monitor=="d" && t%%24==0)   # is it time to Daily monite?
+    Wcheck <- (monitor=="w" && t%%(24*7)==0)   # weekly?   
+    Mcheck <- (monitor=="d" && t%%(24*30)==0)   # Monthly? 
+    if ( !(Dcheck|Wcheck|Mcheck) ) next
+    
+    # 3. GO TO monitor
+    if (
+      (N*m1/12<t && t<N*m3/12 && S[t]>U)
+      ||(N*m2/12<t && t<N*m4/12 && S[t]<L)
+      ) {
+      payoff <- 0; dietime <- t; break
+    } 
+  } # End for
+  if (t==N) {payoff <- max(0,S[t]-K); dietime="Not die"}
+  
+  return(list(S=S, dietime=dietime,payoff=payoff))
+} # End function
+
+
+# ####################################################### #  
+#             simulate option price in 5 cases            #
+# ####################################################### #  
+
+
+
+
+```
+
