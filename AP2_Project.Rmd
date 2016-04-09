@@ -91,24 +91,24 @@ First, use Monte Carlo simulation.
 
 rm(list = ls())
 
-set.seed(12345)
-S <- 1.5
-K <- 1.4
-sigma <- 0.12
-r <- 0.03
-ttm <- 1  # time to maturity
-
-num.sim <- 10000
-
-R <- (r-0.5*sigma^2)*ttm 
-SD <- sigma*sqrt(ttm)
-TTM.price<-S*exp(R+SD*rnorm(num.sim))
-TTM.call<-pmax(0,TTM.price-K)
-PV.call<-TTM.call*(exp(-r*ttm))
-
-MC.call <- mean(PV.call)
-MC.call
-
+f <- function(
+  S0 = 100, K = 90, r = 0.04, sigma = 0.1, TT = 1, N = 1000, 
+  U = 120, L = 85, m1 = 1, m2 = 6, m3 = 8, m4 = 11
+){
+  delta_t <- TT/N
+  S <- c(S0,rep(NA,N-1))
+  lnS <- log(S)
+  Z <- rnorm(N)
+  j <- 0  # counter
+  for (t in 2:N) {
+      lnS[t] <- lnS[t-1] + (r-0.5*sigma^2)*delta_t + sigma*sqrt(delta_t)*rnorm(1)
+      S[t] <- exp(lnS[t])
+  } # End for
+  payoff <- max(0,S[N]-K)
+  price <- payoff/(1+r)
+  
+  return(S=S,price=price)
+} # End function
 ```
 The Monte Carlo simualtion result of call opiton price is 0.1609742
 
@@ -147,8 +147,8 @@ rm(list = ls())
 
 ############  function that simulate ONE path  ################
 
-f <- function(S0=100, K=90, r=0.025, ttm=1, v0=0.01, N=1000,
-              rho=0.1, kap=2, theta=0.01, lambda=0.05, sigma=0.1,
+f <- function(S0=100, K=90, r=0.025, sigma=0.1, ttm=1, N=1000,
+              v0=0.01, rho=0.1, kap=2, theta=0.01, lambda=0.05, 
               U=118, L=81, a=90, b=120)
 {
   delta_t <- ttm/N
@@ -418,7 +418,7 @@ p +
 Here I examine 5 cases: Benchmark (no barriar), monitored monthly, weekly, daily and continuously. By intuition, the (barriar) European call option price will decrease along these 5 cases. I will simulate the underlying stock price path and replicate it M=5000 times, draw the boxplot of simulated option price for each case.
 
 
-```{r}
+```{r 5.discrete-monitor, eval=F}
 
 rm(list = ls())
 
@@ -435,6 +435,7 @@ f <- function(
   S <- c(S0,rep(NA,N-1))
   lnS <- log(S)
   Z <- rnorm(N)
+  j <- 0  # counter
   for (t in 2:N) {
     # 1. generate next S[t]
       lnS[t] <- lnS[t-1] + (r-0.5*sigma^2)*delta_t + sigma*sqrt(delta_t)*rnorm(1)
@@ -444,10 +445,12 @@ f <- function(
     if (monitor=="benchmark") next
     Dcheck <- (monitor=="d" && t%%24==0)   # is it time to Daily monite?
     Wcheck <- (monitor=="w" && t%%(24*7)==0)   # weekly?   
-    Mcheck <- (monitor=="d" && t%%(24*30)==0)   # Monthly? 
-    if ( !(Dcheck|Wcheck|Mcheck) ) next
+    Mcheck <- (monitor=="m" && t%%(24*30)==0)   # Monthly?
+    Ccheck <- (monitor=="cont")  # continue, i.e always check
+    if ( !(Dcheck|Wcheck|Mcheck|Ccheck) ) next
     
     # 3. GO TO monitor
+    j <- j+1
     if (
       (N*m1/12<t && t<N*m3/12 && S[t]>U)
       ||(N*m2/12<t && t<N*m4/12 && S[t]<L)
@@ -456,17 +459,48 @@ f <- function(
     } 
   } # End for
   if (t==N) {payoff <- max(0,S[t]-K); dietime="Not die"}
-  
-  return(list(S=S, dietime=dietime,payoff=payoff))
+  price <- payoff/(1+r)
+  return(list(S=S, dietime=dietime,price=price,checktimes=j))
 } # End function
 
 
 # ####################################################### #  
-#             simulate option price in 5 cases            #
+#      simulate option price in 5 cases and plot          #
 # ####################################################### #  
 
+M <- 150
 
+require(plyr)
+require(doMC)
+registerDoMC(8)
 
+data <- data.frame(
+    index =kronecker(rep(1,5),1:M),
+    method = rep(c("benchmark","m","w","d","cont"),each = M)
+    )
+data$method<- factor(data$method, levels = c("benchmark","m","w","d","cont"))
+
+data_price <- mdply(
+  .data = data,
+  .fun = function(index,method) return(f(monitor = method)$price),
+  .parallel = T,
+  .progress = "text"
+)
+data_price2 <- ddply(data_price, "method", transform,count0 = sum(V1==0))
+
+ggplot(data = data_price2, mapping = aes(x=method, y=V1)) + 
+  geom_boxplot(notch = TRUE) +
+  geom_jitter(aes(col=count0,alpha=0.03),show.legen=F) +
+  scale_y_continuous(trans='log1p') +
+  scale_x_discrete(labels=c("benchmark","monthly","weekly","daily","continuous")) +
+  scale_colour_gradient(low="yellow",high="red") +
+  ggtitle("5. Price discrete-monitored barrier options") +
+  xlab("monitor frequency")+
+  ylab("option price")
 
 ```
+
+![](5.plot.pdf)
+
+I only simulate M=150 times because it takes too many times to run the code in R. In this picture, the boxplot stands for the distribution of the 150 simulated barriar option prices, we can see that as the monitor frequency increase, the mean of option prices decreases. I use color to represent number of option prices which equal to zero. The more monitor frequency, the more zero option prices since it has larger probability to hit the barriar.
 
