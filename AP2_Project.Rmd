@@ -11,7 +11,8 @@ knitr::opts_chunk$set(echo = TRUE,
                       warning = FALSE,
                       error = FALSE,
                       results='hold',
-                      cache = TRUE
+                      cache = TRUE,
+                      include = T
                       )
 ```
 
@@ -29,15 +30,10 @@ Follow the algorithm on Slides, I write the code:
 rm(list = ls())
 
 M <- 10000
-N <- 1000
-TT <- 1
-delta_t <- TT/N
-mu <- 0.03
-sigma <- 0.12
-U <- 1.71
-L <- 1.29
-X <- 1.4
-S0 <- 1.5
+N <- 1000; TT <- 1; delta_t <- TT/N
+X <- 1.4; S0 <- 1.5; mu <- 0.03; sigma <- 0.12
+U <- 1.71; L <- 1.29
+
 
 f <- function(foo){
   S <- rep(NA,N)
@@ -87,13 +83,14 @@ run the code 5 times, I got almost same results:
 
 First, use Monte Carlo simulation.
 
-```{r 2.MC}
-
+```{r 2.f, eval=T}
+################################################################
+#     define f()   #
+################################################################
 rm(list = ls())
 
 f <- function(
-  S0 = 100, K = 90, r = 0.04, sigma = 0.1, TT = 1, N = 1000, 
-  U = 120, L = 85, m1 = 1, m2 = 6, m3 = 8, m4 = 11
+  S0 = 100, K = 90, r = 0.04, sigma = 0.1, TT = 1, N = 1000
 ){
   delta_t <- TT/N
   S <- c(S0,rep(NA,N-1))
@@ -107,16 +104,40 @@ f <- function(
   payoff <- max(0,S[N]-K)
   price <- payoff/(1+r)
   
-  return(S=S,price=price)
+  return(list(S=S,price=price))
 } # End function
 ```
-The Monte Carlo simualtion result of call opiton price is 0.1609742
+```{r 2.MC, eval=F}
+
+################################################################
+#     Monte Carlo simulation   #
+################################################################
+
+M <- 10000  # try different M's
+require(plyr)
+require(doMC)
+registerDoMC(4)
+
+price <- laply(
+  .data = 1:M,
+  .fun = function(foo) return(f()$price),
+  .progress = "text",
+  .parallel = T
+) 
+mean_price <- mean(price)
+SE_price <- sd(price)/sqrt(M)
+
+mean_price
+SE_price
+
+```
+The Monte Carlo simualtion result of call opiton price is 14.24899, SE is  0.09500645
 
 Next, use B-S formula to calculate the European call option price
 $$ C_{B-S} = S\Phi(d_{+})-Ke^{-r(T-t)}\Phi(d_{-}) $$
 
-```{r 2.BS}
-
+```{r 2.BS, eval=F}
+S = 100; K = 90; r = 0.04; sigma = 0.1; ttm = 1; N = 1000
 d1 <- (log(S/K)+(r+0.5*sigma^2)*ttm)/(sigma*sqrt(ttm)) # d+
 d2 <- d1-sigma*sqrt(ttm) # d-
 
@@ -125,7 +146,78 @@ BS.call
 
 ```
 
-As the above output shows, the Black-Scholes call option value is 0.1610577. which is pretty close to the MC call option value of 0.1609742
+As the above output shows, the Black-Scholes call option value is 13.83135. which is pretty close to the MC call option value of 13.76711
+
+plot of some sample paths:
+
+```{r 2.plot_path,eval=F}
+library(ggplot2)
+
+for (j in 1:10) {
+  assign(paste0("S",j), f()$S)
+}
+
+ggplot() + geom_blank(aes(x=1:N,y=seq(80,125,length.out = N))) +
+  ggtitle("10 simulated paths") +
+  scale_x_continuous("time", breaks=seq(0,1000,by = 200), labels=seq(0,1,by = 0.2)) +
+  ylab("Stock price") +
+  geom_point(aes(x=1:N,y=f(sigma=0)$S),col="black") +
+  geom_line(aes(x=1:N,y=S1),col=rainbow(10)[1]) +
+  geom_line(aes(x=1:N,y=S2),col=rainbow(10)[2]) +
+  geom_line(aes(x=1:N,y=S3),col=rainbow(10)[3]) +
+  geom_line(aes(x=1:N,y=S4),col=rainbow(10)[4]) +
+  geom_line(aes(x=1:N,y=S5),col=rainbow(10)[5]) +
+  geom_line(aes(x=1:N,y=S6),col=rainbow(10)[6]) +
+  geom_line(aes(x=1:N,y=S7),col=rainbow(10)[7]) +
+  geom_line(aes(x=1:N,y=S8),col=rainbow(10)[8]) +
+  geom_line(aes(x=1:N,y=S9),col=rainbow(10)[9]) +
+  geom_line(aes(x=1:N,y=S10),col=rainbow(10)[10]) 
+
+```
+
+![](2.plot_path.pdf)
+
+Now try different M's, I expect that as M increases, the SE of option price decrease to 0 and the mean of option price converge to theretical BS value.
+
+```{r 2. different M s, eval=F}
+
+MC2 <- function(M) {
+  
+  price <- laply(
+      .data = 1:M,
+      .fun = function(foo) return(f()$price),
+      .progress = "text",
+      .parallel = T
+      ) 
+  mean_price <- mean(price)
+  SE_price <- sd(price)/sqrt(M)
+  return(c("mean"=mean_price,"se"=SE_price))
+}
+
+M_set <- seq(from=100, to = 5000, by=100)
+store <- matrix(c(0,0), nrow=1, ncol=2)
+for (m in M_set){
+  store <- rbind(store,MC2(m))
+  print(store)
+  message("m is",m)
+}
+
+plot(x=M_set,y=store[-1,"mean"],type="l", 
+     xlab = "# of trials",
+     main = "mean of option price", ylab="option price ")
+abline(h=BS.call)
+plot(x=M_set,y=store[-1,"se"],type="l",
+     xlab = "# of trials", 
+     main = "SE of option price", ylab="SE")
+
+```
+
+![](2.plot_mean.pdf)
+
+![](2.plot_SE.pdf)
+
+from the plot we can see, as I expceted, when number of trials increase, the mean of simulated option price converge to the BS model value, and SE of simulated option price goes to zero.
+
 
 
 ## 3. Price this barrier option by Heston stochastic volatility using Monte Carlo simulation, also plot one sample path which hits the barrier and one path that never hits the barrier.
@@ -191,7 +283,9 @@ f <- function(S0=100, K=90, r=0.025, sigma=0.1, ttm=1, N=1000,
 
 ```{r 3.HestonSV_MC, eval=F}
 
-############  Monte Carlo simulation  ################
+################################################################
+#     Monte Carlo simulation   #
+################################################################
 
 set.seed(123456)
 M <- 5000   # number of simulations
@@ -402,14 +496,6 @@ p +
   geom_segment(aes(x=d5,xend=d5,y=S5[d5],yend=60),col="red2")
 
 ```
-
-
-
-
-
-
-
-
 
 
 
